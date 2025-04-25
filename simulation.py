@@ -1,0 +1,503 @@
+import sys
+from PyQt5.QtCore import Qt, QPointF, QTimer
+from PyQt5.QtGui import QBrush, QColor, QPainter, QPen
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QGraphicsView, QGraphicsScene,
+    QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsItem,
+    QAction, QActionGroup, QToolBar, QDockWidget, QWidget,
+    QFormLayout, QDoubleSpinBox, QSpinBox, QPushButton,
+    QVBoxLayout, QHBoxLayout, QDialog, QDialogButtonBox
+)
+import numpy as np
+from riskaverseqlearning import RiskAverseQLearning
+
+# ---- Constants ----
+AP_COORD = QPointF(0, 0)
+AP_RADIUS = 5
+POINT_SIZE = 5
+
+# ---- Graphics Items ----
+
+class BaseItemMixin:
+    def __init__(self, window):
+        super().__init__()
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setAcceptHoverEvents(True)
+        self.position = (0, 0)
+        self.window = window
+
+    def round_to_SIZE(self, x):
+        return POINT_SIZE * round(x/POINT_SIZE)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionChange:
+            new_pos = value
+            self.position = ( self.round_to_SIZE(new_pos.x()), self.round_to_SIZE(new_pos.y()) )
+            return QPointF(self.position[0], self.position[1])
+        return QGraphicsItem.itemChange(self, change, value)
+
+    def hoverEnterEvent(self, event):
+        self.setOpacity(0.7)
+        QGraphicsItem.hoverEnterEvent(self, event)
+
+    def hoverLeaveEvent(self, event):
+        self.setOpacity(1.0)
+        QGraphicsItem.hoverLeaveEvent(self, event)
+
+class DeviceItem(QGraphicsEllipseItem, BaseItemMixin):
+    def __init__(self, pos, window):
+        super().__init__(-POINT_SIZE / 2, -POINT_SIZE / 2, POINT_SIZE, POINT_SIZE, window=window)
+        BaseItemMixin.__init__(self, window)
+        self.setBrush(QBrush(QColor("blue")))
+        self.setPos(pos)
+        self.sub6_packets = 0
+        self.mmwave_packets = 0
+        self.history = {"sub6_success": [], "mmwave_success": []}
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            dlg = DeviceConfigDialog(self)
+            dlg.exec_()
+        else:
+            super().mouseDoubleClickEvent(event)
+
+class BlockageItem(QGraphicsRectItem, BaseItemMixin):
+    def __init__(self, pos, window):
+        super().__init__(-POINT_SIZE / 2, -POINT_SIZE / 2, POINT_SIZE, POINT_SIZE, window=window)
+        BaseItemMixin.__init__(self, window)
+        self.setBrush(QBrush(QColor("gray")))
+        self.setPos(pos)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            dlg = BlockageConfigDialog(self)
+            dlg.exec_()
+        else:
+            super().mouseDoubleClickEvent(event)
+
+# ---- Config Dialogs ----
+
+class DeviceConfigDialog(QDialog):
+    def __init__(self, device):
+        super().__init__()
+        self.device = device
+        self.setWindowTitle("Configure Device")
+        vlay = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.sub6_spin = QSpinBox()
+        self.sub6_spin.setRange(0, 10**6)
+        self.sub6_spin.setValue(device.sub6_packets)
+        form.addRow("Sub-6GHz packets:", self.sub6_spin)
+
+        self.mm_spin = QSpinBox()
+        self.mm_spin.setRange(0, 10**6)
+        self.mm_spin.setValue(device.mmwave_packets)
+        form.addRow("mmWave packets:", self.mm_spin)
+
+        vlay.addLayout(form)
+        btn_layout = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self.save)
+        
+        del_btn = QPushButton("Delete")
+        del_btn.clicked.connect(self.delete)
+        
+        btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(del_btn)
+        
+        vlay.addLayout(btn_layout)
+
+    def save(self):
+        self.device.sub6_packets = self.sub6_spin.value()
+        self.device.mmwave_packets = self.mm_spin.value()
+        self.accept()
+
+    def delete(self):
+        if self.device.window:
+            self.device.window.removeItem(self.device)
+        scene = self.device.scene()
+        if scene:
+            scene.removeItem(self.device)
+        self.accept()
+
+class BlockageConfigDialog(QDialog):
+    def __init__(self, blockage):
+        super().__init__()
+        self.blockage = blockage
+        self.setWindowTitle("Blockage Options")
+        vlay = QVBoxLayout(self)
+        del_btn = QPushButton("Delete Blockage")
+        del_btn.clicked.connect(self.delete)
+        vlay.addWidget(del_btn)
+        close_btn = QDialogButtonBox(QDialogButtonBox.Close)
+        close_btn.rejected.connect(self.reject)
+        vlay.addWidget(close_btn)
+
+    def delete(self):
+        if self.blockage.window:
+            self.blockage.window.removeItem(self.blockage)
+        scene = self.blockage.scene()
+        if scene:
+            scene.removeItem(self.blockage)
+        self.accept()
+
+# ---- Global Config Widget ----
+
+class GlobalConfigWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        layout = QFormLayout(self)
+
+        self.pwr = QDoubleSpinBox()
+        self.pwr.setMinimum(1)
+        self.pwr.setMaximum(10)
+        self.pwr.setValue(5)
+
+        self.noise = QDoubleSpinBox()
+        self.noise.setMinimum(-1000)
+        self.noise.setMaximum(-1)
+        self.noise.setValue(-169)
+
+        self.bw_sub6 = QDoubleSpinBox()
+        self.bw_sub6.setMinimum(1)
+        self.bw_sub6.setMaximum(10000)
+        self.bw_sub6.setValue(100)
+
+        self.bw_mm = QDoubleSpinBox()
+        self.bw_mm.setMinimum(1)
+        self.bw_mm.setMaximum(10000)
+        self.bw_mm.setValue(1000)
+        
+        #self.freq_sub6 = QDoubleSpinBox()
+        #self.freq_sub6.setMinimum(1)
+        #self.freq_sub6.setMaximum(100)
+        #self.freq_sub6.setValue(2)
+        
+        #self.freq_mm = QDoubleSpinBox()  
+        #self.freq_mm.setMinimum(1)
+        #self.freq_mm.setMaximum(100)
+        #self.freq_mm.setValue(28)
+        
+        self.num_subchannel = QSpinBox()
+        self.num_subchannel.setMinimum(1)
+        self.num_subchannel.setMaximum(100)
+        self.num_subchannel.setValue(4)
+        
+        self.num_beam = QSpinBox()
+        self.num_beam.setMinimum(1)
+        self.num_beam.setMaximum(100)
+        self.num_beam.setValue(4)
+        
+        #self.frame_duration = QDoubleSpinBox()  
+        #self.frame_duration.setMinimum(1)
+        #self.frame_duration.setMaximum(100000)
+        #self.frame_duration.setValue(1000)
+        
+        self.nframes = QSpinBox()        
+        self.nframes.setMinimum(1)
+        self.nframes.setMaximum(100000)
+        self.nframes.setValue(10000)
+        
+        for label, widget in [
+            ("Tx power (dBm):", self.pwr),
+            ("Noise power (dBm):", self.noise),
+            ("BW Sub-6 (MHz):", self.bw_sub6),
+            ("BW mmWave (MHz):", self.bw_mm),
+            ("#Sub channels:", self.num_subchannel),
+            ("#Sub beams:", self.num_beam),
+            #("Freq Sub-6 (GHz):", self.freq_sub6),
+            #("Freq mmWave (GHz):", self.freq_mm),
+            #("Frame duration: ", self.frame_duration),
+            ("# Frames to simulate:", self.nframes),
+        ]:
+            layout.addRow(label, widget)
+
+# ---- Graphics View with Zoom & Pan ----
+
+class GridView(QGraphicsView):
+    def __init__(self, scene):
+        super().__init__(scene)
+        self.setRenderHints(self.renderHints() | QPainter.Antialiasing)
+        self._pan = False
+        self._last_pos = None
+        self.setDragMode(self.RubberBandDrag)
+
+    def wheelEvent(self, e):
+        factor = 1.2 if e.angleDelta().y() > 0 else 1/1.2
+        self.scale(factor, factor)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.RightButton:
+            self._pan = True
+            self._last_pos = e.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+        else:
+            super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._pan and self._last_pos is not None:
+            delta = e.pos() - self._last_pos
+            self._last_pos = e.pos()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+        else:
+            super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.RightButton:
+            self._pan = False
+            self.setCursor(Qt.ArrowCursor)
+        else:
+            super().mouseReleaseEvent(e)
+
+# ---- Main Window ----
+
+class GridScene(QGraphicsScene):
+    def __init__(self, x, y, width, height, grid_step, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setSceneRect(x, y, width, height)
+        self.grid_step = grid_step
+        self.draw_grid()
+
+    def draw_grid(self):
+        pen = QPen(QColor(200, 200, 200), 1, Qt.SolidLine)
+        left = int(self.sceneRect().left())
+        right = int(self.sceneRect().right())
+        top = int(self.sceneRect().top())
+        bottom = int(self.sceneRect().bottom())
+
+        # Vertical lines
+        for x in range(left, right + 1, self.grid_step):
+            self.addLine(x, top, x, bottom, pen)
+
+        # Horizontal lines
+        for y in range(top, bottom + 1, self.grid_step):
+            self.addLine(left, y, right, y, pen)
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("5G Network Simulator")
+        self.scene = GridScene(-500, -500, 1000, 1000, POINT_SIZE)
+        self.view = GridView(self.scene)
+        self.setCentralWidget(self.view)
+
+        ap = QGraphicsEllipseItem(-AP_RADIUS, -AP_RADIUS, AP_RADIUS*2, AP_RADIUS*2)
+        ap.setBrush(QBrush(QColor("red")))
+        ap.setPos(AP_COORD)
+        self.scene.addItem(ap)
+        
+        toolbar = QToolBar("Tools")
+        self.addToolBar(toolbar)
+        
+        mode_group = QActionGroup(self)
+        mode_group.setExclusive(True)
+        
+        self.dev_act = QAction("Place Device", self, checkable=True)
+        self.dev_act.setChecked(True)
+        
+        self.blk_act = QAction("Place Blockage", self, checkable=True)
+        
+        mode_group.addAction(self.dev_act)
+        mode_group.addAction(self.blk_act)
+        
+        toolbar.addAction(self.dev_act)
+        toolbar.addAction(self.blk_act)
+        
+        self.dev_act.triggered.connect(lambda: setattr(self, 'mode', 'device'))
+        self.blk_act.triggered.connect(lambda: setattr(self, 'mode', 'blockage'))
+        
+        self.mode = 'device'
+        self.scene.mousePressEvent = self._scene_click
+
+        cfg_dock = QDockWidget("Global Config", self)
+        cfg_widget = GlobalConfigWidget()
+        cfg_dock.setWidget(cfg_widget)
+        self.cfg = cfg_widget
+        self.addDockWidget(Qt.RightDockWidgetArea, cfg_dock)
+
+        ctrl_dock = QDockWidget("Simulation Controls", self)
+        box = QWidget()
+        vlay = QVBoxLayout(box)
+        self.start_btn = QPushButton("Start Simulation")
+        vlay.addWidget(self.start_btn)
+        
+        self.step_btn = QPushButton("Step One")
+        vlay.addWidget(self.step_btn)
+        
+        self.auto_btn = QPushButton("Auto Step")
+        vlay.addWidget(self.auto_btn)
+        
+        self.reset_btn = QPushButton("Reset Simulation")
+        vlay.addWidget(self.reset_btn)
+        
+        self.step_btn.setEnabled(False)
+        self.auto_btn.setEnabled(False)
+        self.reset_btn.setEnabled(False)
+        self.start_btn.clicked.connect(self._on_start)
+        self.step_btn.clicked.connect(self._on_step)
+        self.reset_btn.clicked.connect(self._on_start)
+        
+        self.auto_btn.clicked.connect(self._on_auto)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._on_step)
+        ctrl_dock.setWidget(box)
+        self.addDockWidget(Qt.RightDockWidgetArea, ctrl_dock)
+        self.devices = []
+        self.blockages = []
+
+    def _scene_click(self, event):
+        if event.button() == Qt.LeftButton:
+            pos = event.scenePos()
+            items = self.scene.items(pos)
+            for it in items:
+                if isinstance(it, (DeviceItem, BlockageItem)):
+                    QGraphicsScene.mouseDoubleClickEvent(self.scene, event)
+                    return
+            if self.mode == 'device': 
+                itm = DeviceItem(pos, self)
+                self.devices.append(itm)
+            else: 
+                itm = BlockageItem(pos, self)
+                self.blockages.append(itm)
+                
+            self.scene.addItem(itm)
+            return
+        QGraphicsScene.mousePressEvent(self.scene, event)
+
+    def _on_start(self):
+        self.step_btn.setEnabled(True)
+        self.auto_btn.setEnabled(True)
+        self.start_btn.setEnabled(False)
+        self.reset_btn.setEnabled(True)
+        
+        self.setup_simulation()
+
+    def setup_simulation(self):
+        for d in self.devices: 
+            d.history = {"sub6_success":[],"mmwave_success":[]}
+        self.cur_frame = 0
+        self.distances = [0] * len(self.devices)
+        self.nblocks = [0] * len(self.devices)
+        for i, device in enumerate(self.devices): # |device| * |blockage|
+            sq = (device.position[0]**2 + device.position[1]**2)
+            self.distances[i] = (sq ** 0.50)
+            for blockage in self.blockages:
+                cross = blockage.position[1] * device.position[0] - blockage.position[0] * device.position[1]
+                if cross != 0:
+                    continue
+                dot = blockage.position[0] * device.position[0] + blockage.position[1] * device.position[1]
+                if dot < 0:
+                    continue
+                if dot > sq:
+                    continue
+                self.nblocks[i] += 1
+        print(self.nblocks)
+        self.plr = [0] * len(self.devices)
+        self.qlearn = RiskAverseQLearning(len(self.devices), self.cfg.num_subchannel.value(), self.cfg.num_beam.value(), 4, 1e-3, 256*8)
+
+    def _on_step(self):
+        if self.cur_frame >= self.cfg.nframes.value(): 
+            self.timer.stop()
+            return
+        self.cur_frame += 1
+        self.simulation()
+
+    def _on_auto(self): 
+        self.timer.start(0)
+    
+    def removeItem(self, item):
+        assert item in self.devices or item in self.blockages, "Item should be in device or blockage list"
+        if item in self.devices:
+            self.devices.remove(item)
+        else:
+            self.blockages.remove(item)
+    
+    def _db_to_linear(self, db):
+        #db -> W
+        return 10 ** (db / 10)
+    def _tx_beam_gain(self, theta, beta, eps=0.1): #eq(4)
+        return (2 * np.pi - (2 * np.pi - theta) * eps) / theta
+    
+    def simulation(self):
+        num_devices = len(self.devices)
+        achievable_rate = [(0, 0)] * num_devices
+    
+        # Calculate achievable rate for each devices
+        P_tx_dbm = self.cfg.pwr.value()
+        P_tx = self._db_to_linear(P_tx_dbm - 30)
+        P_tx_sub = P_tx / max(1, self.cfg.num_subchannel.value())
+        noise_density_dbm = self.cfg.noise.value()
+        noise_density = self._db_to_linear(noise_density_dbm - 30)
+        W_sub = self.cfg.bw_sub6.value() * 1e6
+        W_sub = W_sub / max(1, self.cfg.num_subchannel.value())
+        W_mm = self.cfg.bw_mm.value() * 1e6
+        
+        for i, dev in enumerate(self.devices):
+            d = self.distances[i]
+            
+            # Sub-6GHz
+            h_tilde_sub = (np.random.normal() + 1j*np.random.normal()) / np.sqrt(2) # rayleigh
+            h_sub = np.abs(h_tilde_sub) ** 2
+            PL_sub_db = 38.5 + 30 * np.log10(d)
+            PL_sub_lin = self._db_to_linear(-PL_sub_db)
+            h_comb_sub = h_sub * PL_sub_lin
+            I_sub = 0 # 1 AP -> no interference
+            gamma_sub = P_tx_sub * h_comb_sub / (I_sub + W_sub * noise_density)
+            rate_sub = W_sub * np.log2(1 + gamma_sub)
+
+            # mmWave
+            if self.nblocks[i]:
+                PL_mm_db = 72 + 29.2 * np.log10(d) + np.random.normal(0, 8.7)
+            else:
+                PL_mm_db = 61.4 + 20 * np.log10(d) + np.random.normal(0, 5.8)
+            PL_mm_lin = self._db_to_linear(-PL_mm_db)
+            h_tilde_mm = (np.random.normal() + 1j*np.random.normal()) / np.sqrt(2) # rayleigh
+            h_mm = np.abs(h_tilde_mm) ** 2
+            G_tx = self._tx_beam_gain(0.1, 0.0)
+            G_rx = 1.0
+            h_comb_mm = G_tx * h_mm * PL_mm_lin * G_rx
+            I_mm = 0 # 1 AP -> no interference
+            gamma_mm = P_tx * h_comb_mm / (I_mm + W_mm * noise_density)
+            rate_mm = W_mm * np.log2(1 + gamma_mm)
+            
+            achievable_rate[i] = (rate_sub, rate_mm)
+            
+        frame_duration = 1e-3 # 1ms
+        packet_size = 256*8 # unspecified, so just pick this value
+        achievable = [list(map(lambda x: int(x * frame_duration / packet_size), A)) for A in achievable_rate]
+        print("Achievable Rate: ", [list(map(float, A)) for A in achievable_rate])
+        print("Achievable: ", achievable)
+        
+        q_learn_act, safe = self.qlearn.get_current_action()
+        action = self.qlearn.map_action(q_learn_act)
+        success = [[0, 0] for _ in range(num_devices)]
+        if safe:
+            for k in range(num_devices):
+                for i in range(2):
+                    success[k][i] = min(action[k][i], achievable[k][i])
+        self.qlearn.update_to_new_state(success, self.cur_frame, q_learn_act, achievable_rate)
+        
+        metric = 0 
+        for k in range(len(self.devices)):
+            cur_plr = 1-sum(success[k])/sum(action[k])
+            old_plr = self.plr[k] * (self.cur_frame-1)
+            self.plr[k] = (old_plr + cur_plr) / self.cur_frame
+            metric += self.qlearn.PLR_req - self.plr[k]
+        metric /= len(self.devices)
+        
+        print("Send: ", action)
+        print("Recv: ", success)
+        print("Metric DeltaP: ", metric)
+        
+        print(f"Stepped, frame: {self.cur_frame}")
+        
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec_())
