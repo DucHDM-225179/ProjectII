@@ -8,6 +8,8 @@ from PyQt5.QtWidgets import (
     QFormLayout, QDoubleSpinBox, QSpinBox, QPushButton,
     QVBoxLayout, QHBoxLayout, QDialog, QDialogButtonBox
 )
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 import numpy as np
 from riskaverseqlearning import RiskAverseQLearning
 
@@ -15,6 +17,79 @@ from riskaverseqlearning import RiskAverseQLearning
 AP_COORD = QPointF(0, 0)
 AP_RADIUS = 5
 POINT_SIZE = 5
+
+# ---- Graph Window ----
+class GraphWindow(QMainWindow):
+    def __init__(self, title="Graph", xlabel="X", ylabel="Y", fit_to_screen=True, padding=(0.1, 0.1)):
+        super().__init__()
+        self.setWindowTitle(title)
+        self.nabel = xlabel
+        self.ylabel = ylabel
+        self.fit_to_screen = fit_to_screen
+        self.padding = padding
+        self.xlabel = xlabel
+        self.ylabel = ylabel
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+
+        self.figure = Figure()
+        self.canvas = FigureCanvas(self.figure)
+        layout.addWidget(self.canvas)
+
+        self.ax = self.figure.add_subplot(111)
+        self.ax.set_title(title)
+        self.ax.set_xlabel(xlabel)
+        self.ax.set_ylabel(ylabel)
+        self.lines = {}
+
+    def add_series(self, name, x=None, y=None):
+        if name in self.lines:
+            return
+        line, = self.ax.plot(x or [], y or [], label=name)
+        self.lines[name] = {'line': line, 'x': list(x or []), 'y': list(y or [])}
+        self.ax.legend()
+        self._rescale()
+        self.canvas.draw()
+
+    def add_point(self, name, x, y):
+        if name not in self.lines:
+            self.add_series(name, [x], [y])
+            return
+        series = self.lines[name]
+        series['x'].append(x)
+        series['y'].append(y)
+        series['line'].set_data(series['x'], series['y'])
+        self._rescale()
+        self.canvas.draw()
+
+    def clear(self):
+        self.ax.cla()
+        self.lines.clear()
+        self.ax.set_title(self.windowTitle())
+        self.ax.set_xlabel(self.xlabel)
+        self.ax.set_ylabel(self.ylabel)
+        self.canvas.draw()
+
+    def _rescale(self):
+        all_x = []
+        all_y = []
+        for s in self.lines.values():
+            all_x.extend(s['x'])
+            all_y.extend(s['y'])
+        if not all_x or not all_y:
+            return
+        xmin, xmax = min(all_x), max(all_x)
+        ymin, ymax = min(all_y), max(all_y)
+        if self.fit_to_screen:
+            self.ax.set_xlim(xmin, xmax)
+            self.ax.set_ylim(ymin, ymax)
+        else:
+            dx = (xmax - xmin) * self.padding[0]
+            dy = (ymax - ymin) * self.padding[1]
+            self.ax.set_xlim(xmin - dx, xmax + dx)
+            self.ax.set_ylim(ymin - dy, ymax + dy)
 
 # ---- Graphics Items ----
 
@@ -217,6 +292,8 @@ class GlobalConfigWidget(QWidget):
 
 # ---- Graphics View with Zoom & Pan ----
 
+
+
 class GridView(QGraphicsView):
     def __init__(self, scene):
         super().__init__(scene)
@@ -284,6 +361,14 @@ class MainWindow(QMainWindow):
         self.scene = GridScene(-500, -500, 1000, 1000, POINT_SIZE)
         self.view = GridView(self.scene)
         self.setCentralWidget(self.view)
+        
+        self.graph_windows = {}
+        # Pre-create any hardcoded graphs
+        for g in [("Metric","Frame","ΔP"), ("Reward", "Frame", "Reward")]:
+            name,xl,yl=g
+            gw=GraphWindow(title=name, xlabel=xl, ylabel=yl, fit_to_screen=False)
+            gw.show()
+            self.graph_windows[name]=gw
 
         ap = QGraphicsEllipseItem(-AP_RADIUS, -AP_RADIUS, AP_RADIUS*2, AP_RADIUS*2)
         ap.setBrush(QBrush(QColor("red")))
@@ -339,7 +424,7 @@ class MainWindow(QMainWindow):
         self.reset_btn.setEnabled(False)
         self.start_btn.clicked.connect(self._on_start)
         self.step_btn.clicked.connect(self._on_step)
-        self.reset_btn.clicked.connect(self._on_start)
+        self.reset_btn.clicked.connect(self._on_reset)
         
         self.auto_btn.clicked.connect(self._on_auto)
         self.timer = QTimer(self)
@@ -375,6 +460,11 @@ class MainWindow(QMainWindow):
         self.reset_btn.setEnabled(True)
         
         self.setup_simulation()
+        
+    def _on_reset(self):
+        # clear graphs
+        for gw in self.graph_windows.values(): gw.clear()
+        self._on_start()
 
     def setup_simulation(self):
         for d in self.devices: 
@@ -395,7 +485,6 @@ class MainWindow(QMainWindow):
                 if dot > sq:
                     continue
                 self.nblocks[i] += 1
-        print(self.nblocks)
         self.plr = [0] * len(self.devices)
         self.qlearn = RiskAverseQLearning(len(self.devices), self.cfg.num_subchannel.value(), self.cfg.num_beam.value(), 4, 1e-3, 256*8)
 
@@ -419,7 +508,7 @@ class MainWindow(QMainWindow):
     def _db_to_linear(self, db):
         #db -> W
         return 10 ** (db / 10)
-    def _tx_beam_gain(self, theta, beta, eps=0.1): #eq(4)
+    def _tx_beam_gain(self, theta, eps=0.1): #eq(4), no beta
         return (2 * np.pi - (2 * np.pi - theta) * eps) / theta
     
     def simulation(self):
@@ -457,8 +546,8 @@ class MainWindow(QMainWindow):
             PL_mm_lin = self._db_to_linear(-PL_mm_db)
             h_tilde_mm = (np.random.normal() + 1j*np.random.normal()) / np.sqrt(2) # rayleigh
             h_mm = np.abs(h_tilde_mm) ** 2
-            G_tx = self._tx_beam_gain(0.1, 0.0)
-            G_rx = 1.0
+            G_tx = self._tx_beam_gain(0.07)
+            G_rx = 10**(3/10)
             h_comb_mm = G_tx * h_mm * PL_mm_lin * G_rx
             I_mm = 0 # 1 AP -> no interference
             gamma_mm = P_tx * h_comb_mm / (I_mm + W_mm * noise_density)
@@ -469,7 +558,7 @@ class MainWindow(QMainWindow):
         frame_duration = 1e-3 # 1ms
         packet_size = 256*8 # unspecified, so just pick this value
         achievable = [list(map(lambda x: int(x * frame_duration / packet_size), A)) for A in achievable_rate]
-        print("Achievable Rate: ", [list(map(float, A)) for A in achievable_rate])
+        #print("Achievable Rate: ", [list(map(float, A)) for A in achievable_rate])
         print("Achievable: ", achievable)
         
         q_learn_act, safe = self.qlearn.get_current_action()
@@ -479,11 +568,14 @@ class MainWindow(QMainWindow):
             for k in range(num_devices):
                 for i in range(2):
                     success[k][i] = min(action[k][i], achievable[k][i])
-        self.qlearn.update_to_new_state(success, self.cur_frame, q_learn_act, achievable_rate)
+        reward = self.qlearn.update_to_new_state(success, self.cur_frame, q_learn_act, achievable_rate)
         
         metric = 0 
         for k in range(len(self.devices)):
-            cur_plr = 1-sum(success[k])/sum(action[k])
+            cur_psr = 1
+            if sum(action[k]):
+                cur_psr = sum(success[k])/sum(action[k])
+            cur_plr = 1-cur_psr
             old_plr = self.plr[k] * (self.cur_frame-1)
             self.plr[k] = (old_plr + cur_plr) / self.cur_frame
             metric += self.qlearn.PLR_req - self.plr[k]
@@ -492,6 +584,10 @@ class MainWindow(QMainWindow):
         print("Send: ", action)
         print("Recv: ", success)
         print("Metric DeltaP: ", metric)
+        
+        if self.cur_frame % 100 == 0:
+            gw=self.graph_windows.get("Metric"); gw.add_point("Metric", self.cur_frame, metric)
+            gw=self.graph_windows.get("Reward"); gw.add_point("Reward", self.cur_frame, reward)
         
         print(f"Stepped, frame: {self.cur_frame}")
         
