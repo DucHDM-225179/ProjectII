@@ -31,8 +31,6 @@ class RiskAverseQLearning:
         self.PLR = [[0.0, 0.0] for _ in range(K)]
         self.PSR = [1.0 for _ in range(K)]
         self.Q_table = [defaultdict(lambda:defaultdict(lambda:0.0)) for _ in range(I)]
-        self.Q_sum = defaultdict(lambda:defaultdict(lambda:0.0))
-        self.Q_hat = [defaultdict(lambda:defaultdict(lambda:0.0)) for _ in range(I)]
         self.Count = [defaultdict(lambda:defaultdict(int)) for _ in range(I)]
         self.cur_state = None
         self.init_state()
@@ -65,11 +63,9 @@ class RiskAverseQLearning:
         return tuple(random.choices(range(3), k=self.num_devices))
     
     def get_action_tuple(self, Q_hat_index):
-        Q_hat_ = self.Q_hat[Q_hat_index]
         cur_state = self.cur_state
-        return self.get_max_action(Q_hat_, cur_state)[0]
         
-        # compute Q_hat explicitly
+        # compute Q_hat explicitly (fix big oversight)
         Q_bar = defaultdict(lambda:defaultdict(lambda:0.0))
         for i in range(self.num_Qtable):
             if cur_state not in self.Q_table[i]:
@@ -87,10 +83,6 @@ class RiskAverseQLearning:
                 q = self.Q_table[Q_hat_index][cur_state][a]
             Q_hat[cur_state][a] = q - self.risk_control / max(1,(self.num_Qtable-1)) * Q_hat[cur_state][a]
             
-        # sanity check
-        if cur_state in Q_hat_:
-            for a in Q_hat_[cur_state]:
-                assert abs(Q_hat_[cur_state][a] - Q_hat[cur_state][a]) <= 1e-6, f"Expecting {Q_hat_[cur_state][a]}, got {Q_hat[cur_state][a]}"
         return self.get_max_action(Q_hat, cur_state)[0]
     
     def receive_reward(self, reward, cur_frame, sample_achievable):
@@ -113,7 +105,7 @@ class RiskAverseQLearning:
                     new_plr = 1 - self.Success[k][i] / self.Alloc[k][i]
                 self.PLR[k][i] = (last_plr + new_plr) / cur_frame
         #print("PLR each device: ", [sum(x)/2 for x in self.PLR])
-        print("PLR each device: ", self.PLR)
+        #print("PLR each device: ", self.PLR)
         
         # update PSR
         for k in range(self.num_devices):
@@ -124,7 +116,8 @@ class RiskAverseQLearning:
             self.PSR[k] = (last_psr + new_psr) /  cur_frame
             
             total_reward += self.PSR[k]
-        print("PSR each device: ", self.PSR)
+            #total_reward += new_psr
+        #print("PSR each device: ", self.PSR)
         
         # update known average rate
         for k in range(self.num_devices):
@@ -182,7 +175,6 @@ class RiskAverseQLearning:
     
     def get_current_action(self):
         Q_hat_chosen = random.choice(range(self.num_Qtable))
-        print("Q_H: ", Q_hat_chosen)
         self.exploration_rate *= self.decay_factor
         r1 = random.random()
         if r1 < self.exploration_rate:
@@ -203,12 +195,12 @@ class RiskAverseQLearning:
         old_state = tuple(list(self.cur_state))
         
         rew = self.receive_reward(reward, cur_frame, sample_achievable_rate)
-        print("Reward: ", rew)
+        #print("Reward: ", rew)
         self.update_state()
         
         new_state = self.cur_state
-        print("Old state: ", old_state)
-        print("New state: ", new_state)
+        #print("Old state: ", old_state)
+        #print("New state: ", new_state)
         
         # update table
         msk = np.random.poisson(size=self.num_Qtable)
@@ -232,25 +224,4 @@ class RiskAverseQLearning:
             if oldQ != newQ:
                 if newQ != 0:
                     self.Q_table[i][old_state][action] = newQ
-                C = self.Q_sum[old_state][action] - oldQ
-                self.Q_sum[old_state][action] += newQ-oldQ
-                factor_rate = -self.risk_control / max(1,(self.num_Qtable-1))
-                inside_change = newQ*newQ - oldQ*oldQ
-                inside_change -= ((newQ-oldQ)*(newQ+oldQ+C+C)) / self.num_Qtable
-                for j in range(self.num_Qtable): # update all Q_hat
-                    self.Q_hat[j][old_state][action] += factor_rate * inside_change
-                    if i == j:
-                        self.Q_hat[j][old_state][action] += newQ - oldQ
-        
-        # sanity check
-        #for i in range(self.num_Qtable):
-        #   sanity_check = sum(self.Q_table[a][old_state][action] for a in range(self.num_Qtable))
-        #   assert abs(self.Q_sum[old_state][action] - sanity_check) <= 1e-6, f"Expecting {sanity_check}, got {self.Q_sum[old_state][action]}"
-        # 
-        #   sanity_check = self.Q_table[i][old_state][action] if old_state in self.Q_table[i] and action in self.Q_table[i][old_state] else 0
-        #   qavg = sum([self.Q_table[a][old_state][action] if old_state in self.Q_table[a] and action in self.Q_table[a][old_state] else 0 for a in range(self.num_Qtable)]) / self.num_Qtable
-        #   
-        #   sanity_check -= self.risk_control / max(1,(self.num_Qtable-1)) * sum([(self.Q_table[a][old_state][action]-qavg)**2 if old_state in self.Q_table[a] and action in self.Q_table[a][old_state] else qavg**2 for a in range(self.num_Qtable)])
-        #   assert abs(self.Q_hat[i][old_state][action] - sanity_check) <= 1e-6, f"Expecting {sanity_check}, got {self.Q_hat[i][old_state][action]}"
-        
         return rew

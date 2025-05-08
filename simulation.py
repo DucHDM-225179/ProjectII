@@ -505,10 +505,13 @@ class MainWindow(QMainWindow):
         else:
             self.blockages.remove(item)
     
+    
     def _db_to_linear(self, db):
-        #db -> W
         return 10 ** (db / 10)
+    def _dbm_to_linear(self, dbm):
+        return self._db_to_linear(dbm-30)
     def _tx_beam_gain(self, theta, eps=0.1): #eq(4), no beta
+        theta = abs(theta)
         return (2 * np.pi - (2 * np.pi - theta) * eps) / theta
     
     def simulation(self):
@@ -517,49 +520,75 @@ class MainWindow(QMainWindow):
     
         # Calculate achievable rate for each devices
         P_tx_dbm = self.cfg.pwr.value()
-        P_tx = self._db_to_linear(P_tx_dbm - 30)
-        P_tx_sub = P_tx / max(1, self.cfg.num_subchannel.value())
-        noise_density_dbm = self.cfg.noise.value()
-        noise_density = self._db_to_linear(noise_density_dbm - 30)
-        W_sub = self.cfg.bw_sub6.value() * 1e6
-        W_sub = W_sub / max(1, self.cfg.num_subchannel.value())
-        W_mm = self.cfg.bw_mm.value() * 1e6
+        P_tx_W = self._dbm_to_linear(P_tx_dbm)
         
+        noise_density_dbm_hz = self.cfg.noise.value()
+        noise_density_W_hz = self._dbm_to_linear(noise_density_dbm_hz) # W/Hz
+
+        W_sub_MHz = self.cfg.bw_sub6.value()
+        W_sub_Hz = W_sub_MHz * 1e6
+        N_subchannels = max(1, self.cfg.num_subchannel.value())
+        W_sub_per_channel_Hz = W_sub_Hz / N_subchannels
+        P_tx_sub_W = P_tx_W / N_subchannels
+        
+        W_mm_MHz = self.cfg.bw_mm.value()
+        W_mm_Hz = W_mm_MHz * 1e6
+        P_tx_mm_W = P_tx_W
+        
+        mmWave_tx_beamwidth_rad = 0.1
+        mmWave_tx_sidelobe_gain = 0.1
+        mmWave_rx_gain_lin = self._db_to_linear(3.0)
+
         for i, dev in enumerate(self.devices):
             d = self.distances[i]
             
-            # Sub-6GHz
-            h_tilde_sub = (np.random.normal() + 1j*np.random.normal()) / np.sqrt(2) # rayleigh
-            h_sub = np.abs(h_tilde_sub) ** 2
+            # --- Sub-6GHz ---
+            # Path Loss (Large-scale Fading)
             PL_sub_db = 38.5 + 30 * np.log10(d)
             PL_sub_lin = self._db_to_linear(-PL_sub_db)
-            h_comb_sub = h_sub * PL_sub_lin
-            I_sub = 0 # 1 AP -> no interference
-            gamma_sub = P_tx_sub * h_comb_sub / (I_sub + W_sub * noise_density)
-            rate_sub = W_sub * np.log2(1 + gamma_sub)
+            # Small-scale Fading (Rayleigh) - Power gain |h|^2
+            h_small_scale_sub_power = np.random.rayleigh(scale=1.0)
+            # Combined Channel Power Gain
+            h_comb_sub_power = h_small_scale_sub_power * PL_sub_lin # |h_bkn(t)|^2 in Eq (1)
+            # Noise Power in subchannel bandwidth
+            noise_power_sub = noise_density_W_hz * W_sub_per_channel_Hz
+            # SINR (I = 0)
+            gamma_sub = (P_tx_sub_W * h_comb_sub_power) / noise_power_sub
+            # Achievable Rate - Eq (5)
+            rate_sub_bps = W_sub_per_channel_Hz * np.log2(1 + gamma_sub)
 
-            # mmWave
-            if self.nblocks[i]:
-                PL_mm_db = 72 + 29.2 * np.log10(d) + np.random.normal(0, 8.7)
-            else:
-                PL_mm_db = 61.4 + 20 * np.log10(d) + np.random.normal(0, 5.8)
+             # --- mmWave ---
+            # Path Loss - based on blockage status
+            is_blocked = self.nblocks[i] > 0
+            if is_blocked: # NLoS
+                shadowing_nlos_db = np.random.normal(0, 8.7)
+                PL_mm_db = 72 + 29.2 * np.log10(d) + shadowing_nlos_db
+            else: # LoS
+                shadowing_los_db = np.random.normal(0, 5.8)
+                PL_mm_db = 61.4 + 20 * np.log10(d) + shadowing_los_db
             PL_mm_lin = self._db_to_linear(-PL_mm_db)
-            h_tilde_mm = (np.random.normal() + 1j*np.random.normal()) / np.sqrt(2) # rayleigh
-            h_mm = np.abs(h_tilde_mm) ** 2
-            G_tx = self._tx_beam_gain(0.07)
-            G_rx = 10**(3/10)
-            h_comb_mm = G_tx * h_mm * PL_mm_lin * G_rx
-            I_mm = 0 # 1 AP -> no interference
-            gamma_mm = P_tx * h_comb_mm / (I_mm + W_mm * noise_density)
-            rate_mm = W_mm * np.log2(1 + gamma_mm)
-            
-            achievable_rate[i] = (rate_sub, rate_mm)
+            # Small-scale Fading (Rayleigh assumed for h_bkm^mW) - Power gain
+            h_small_scale_mm_power = np.random.rayleigh(scale=1.0) # |h_bkm^mW|^2 part
+            # Tx Antenna Gain - Eq (4)
+            G_tx_lin = self._tx_beam_gain(mmWave_tx_beamwidth_rad, mmWave_tx_sidelobe_gain) # G_b(theta, beta)
+            # Rx Antenna Gain
+            G_rx_lin = mmWave_rx_gain_lin # G_k^Rx
+            # Combined Channel Power Gain - Eq (3)
+            h_comb_mm_power = G_tx_lin * h_small_scale_mm_power * PL_mm_lin * G_rx_lin # h_bkm(theta, beta)
+            # Noise Power in mmWave bandwidth
+            noise_power_mm = noise_density_W_hz * W_mm_Hz
+            # SINR (I = 0)
+            gamma_mm = (P_tx_mm_W * h_comb_mm_power) / noise_power_mm
+            # Achievable Rate - Eq (5)
+            rate_mm_bps = W_mm_Hz * np.log2(1 + gamma_mm)
+
+            achievable_rate[i] = (max(0, rate_sub_bps), max(0, rate_mm_bps))
             
         frame_duration = 1e-3 # 1ms
         packet_size = 256*8 # unspecified, so just pick this value
         achievable = [list(map(lambda x: int(x * frame_duration / packet_size), A)) for A in achievable_rate]
         #print("Achievable Rate: ", [list(map(float, A)) for A in achievable_rate])
-        print("Achievable: ", achievable)
+        #print("Achievable: ", achievable)
         
         q_learn_act, safe = self.qlearn.get_current_action()
         action = self.qlearn.map_action(q_learn_act)
@@ -581,9 +610,9 @@ class MainWindow(QMainWindow):
             metric += self.qlearn.PLR_req - self.plr[k]
         metric /= len(self.devices)
         
-        print("Send: ", action)
-        print("Recv: ", success)
-        print("Metric DeltaP: ", metric)
+        #print("Send: ", action)
+        #print("Recv: ", success)
+        #print("Metric DeltaP: ", metric)
         
         if self.cur_frame % 100 == 0:
             gw=self.graph_windows.get("Metric"); gw.add_point("Metric", self.cur_frame, metric)
