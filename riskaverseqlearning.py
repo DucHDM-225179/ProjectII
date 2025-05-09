@@ -25,7 +25,6 @@ class RiskAverseQLearning:
         self.Lk = [6] * K
         
         self.known_average_rate = [[0,0] for _ in range(K)]
-        self.OldSuccess = [[0, 0] for _ in range(K)]
         self.Success = [[0, 0] for _ in range(K)]
         self.Alloc = [[0, 0] for _ in range(K)]
         self.PLR = [[0.0, 0.0] for _ in range(K)]
@@ -36,6 +35,9 @@ class RiskAverseQLearning:
         self.init_state()
     
     def init_state(self):
+        """
+        Initialize to a random state
+        """
         state = []
         for k in range(self.num_devices):
             a = random.choice(range(self.Lk[k]+1))
@@ -49,20 +51,29 @@ class RiskAverseQLearning:
         self.cur_state = tuple(state)
     
     def update_state(self):
+        """
+        Update the current state based on PLR and Success
+        """
         state = []
         for k in range(self.num_devices):
             state.extend([
                 int(self.PLR[k][0] <= self.PLR_req),
                 int(self.PLR[k][1] <= self.PLR_req),
-                self.OldSuccess[k][0],
-                self.OldSuccess[k][1]
+                self.Success[k][0],
+                self.Success[k][1]
                 ])
         self.cur_state = tuple(state)
     
     def get_random_action_tuple(self):
+        """
+        Get a random {x}^k tuple, x in (0,1,2)
+        """
         return tuple(random.choices(range(3), k=self.num_devices))
     
     def get_action_tuple(self, Q_hat_index):
+        """
+        Get an action when choose Q^H = Q_hat_index
+        """
         cur_state = self.cur_state
         
         # compute Q_hat explicitly (fix big oversight)
@@ -86,18 +97,17 @@ class RiskAverseQLearning:
         return self.get_max_action(Q_hat, cur_state)[0]
     
     def receive_reward(self, reward, cur_frame, sample_achievable):
+        """
+        Receive r(s,a), update to s'
+        """
+        
         # reward = array of [success sub6, success mmWave]
-        self.OldSuccess = self.Success
         self.Success = reward
         
         total_reward = 0
 
         # update PLR
         for k in range(self.num_devices):
-            #update based on current, not new state
-            total_reward -= 1 - int(self.PLR[k][0] <= self.PLR_req)
-            total_reward -= 1 - int(self.PLR[k][1] <= self.PLR_req)
-            
             for i in range(2):
                 last_plr = self.PLR[k][i] * (cur_frame-1)
                 new_plr = 0
@@ -105,7 +115,7 @@ class RiskAverseQLearning:
                     new_plr = 1 - self.Success[k][i] / self.Alloc[k][i]
                 self.PLR[k][i] = (last_plr + new_plr) / cur_frame
         #print("PLR each device: ", [sum(x)/2 for x in self.PLR])
-        #print("PLR each device: ", self.PLR)
+        print("PLR each device: ", self.PLR)
         
         # update PSR
         for k in range(self.num_devices):
@@ -117,6 +127,9 @@ class RiskAverseQLearning:
             
             total_reward += self.PSR[k]
             #total_reward += new_psr
+            
+            total_reward -= 1 - int(self.PLR[k][0] <= self.PLR_req)
+            total_reward -= 1 - int(self.PLR[k][1] <= self.PLR_req)
         #print("PSR each device: ", self.PSR)
         
         # update known average rate
@@ -131,6 +144,9 @@ class RiskAverseQLearning:
         return total_reward
     
     def map_action(self, action_chosen):
+        """
+        Given tuple {x}^k, x in (0,1,2), map to [ <mm_i, sub6_i> ]
+        """
         for i, action in enumerate(action_chosen):
             if action == 0:
                 self.Alloc[i][0] = max(1, min(int(self.known_average_rate[i][0] * self.frame_duration / self.packet_size), self.Lk[i]))
@@ -144,6 +160,9 @@ class RiskAverseQLearning:
         return self.Alloc
     
     def get_max_action(self, Q, s):
+        """
+        Given Q and s, return [a, v] such that v = Q[s][a] max
+        """
         if s not in Q:
             return [self.get_random_action_tuple(), 0]
         state = Q[s]
@@ -174,6 +193,9 @@ class RiskAverseQLearning:
         return [random.choice(aList), 0]
     
     def get_current_action(self):
+        """
+        Env ask for best action
+        """
         Q_hat_chosen = random.choice(range(self.num_Qtable))
         self.exploration_rate *= self.decay_factor
         r1 = random.random()
@@ -191,16 +213,18 @@ class RiskAverseQLearning:
         return -math.exp(self.utility_func_param * x) 
         
     def update_to_new_state(self, reward, cur_frame, action, sample_achievable_rate):
+        """
+        Env send result of action a(t), calc r(t), update to s(t+1)
+        """
         assert(self.cur_state)
-        old_state = tuple(list(self.cur_state))
+        old_state = self.cur_state
         
         rew = self.receive_reward(reward, cur_frame, sample_achievable_rate)
-        #print("Reward: ", rew)
         self.update_state()
         
         new_state = self.cur_state
-        #print("Old state: ", old_state)
-        #print("New state: ", new_state)
+        print("Old state: ", old_state)
+        print("New state: ", new_state)
         
         # update table
         msk = np.random.poisson(size=self.num_Qtable)
@@ -217,11 +241,8 @@ class RiskAverseQLearning:
             # find max Action in current Q (max[a] Q(s(t+1), *))
             max_QA = self.get_max_action(self.Q_table[i], new_state)[1]
             x0 = -1
-            newQ = oldQ + oldA * (self.calc_utility(rew + self.discount_factor * max_QA - oldQ) - x0)
+            newQ = oldQ + oldA * (self.calc_utility(rew + self.discount_factor * max_QA - oldQ) - x0) # eq (21)
             
-            self.Count[i][old_state][action] += 1 # line 14+15
-            
-            if oldQ != newQ:
-                if newQ != 0:
-                    self.Q_table[i][old_state][action] = newQ
+            self.Count[i][old_state][action] += 1 # line 14+15            
+            self.Q_table[i][old_state][action] = newQ
         return rew
