@@ -486,11 +486,16 @@ class MainWindow(QMainWindow):
                     continue
                 self.nblocks[i] += 1
         self.plr = [0] * len(self.devices)
-        self.qlearn = RiskAverseQLearning(len(self.devices), self.cfg.num_subchannel.value(), self.cfg.num_beam.value(), 4, 1e-3, 256*8)
+        self.RewList = []
+        self.qlearn = RiskAverseQLearning(len(self.devices), self.cfg.num_subchannel.value(), self.cfg.num_beam.value(), 4, 1e-3, 8000)
 
     def _on_step(self):
         if self.cur_frame >= self.cfg.nframes.value(): 
             self.timer.stop()
+            
+            with open('log.txt', 'w+') as f:
+                f.write('\n'.join([str(x) for x in self.RewList]))
+            
             return
         self.cur_frame += 1
         self.simulation()
@@ -568,7 +573,7 @@ class MainWindow(QMainWindow):
                 PL_mm_db = 61.4 + 20 * np.log10(d) + shadowing_los_db
             PL_mm_lin = self._db_to_linear(-PL_mm_db)
             # Small-scale Fading (Rayleigh assumed for h_bkm^mW) - Power gain
-            h_small_scale_mm_power = np.random.rayleigh(scale=1.0) # |h_bkm^mW|^2 part
+            h_small_scale_mm_power = np.random.rayleigh(scale=1.0)
             # Tx Antenna Gain - Eq (4)
             G_tx_lin = self._tx_beam_gain(mmWave_tx_beamwidth_rad, mmWave_tx_sidelobe_gain) # G_b(theta, beta)
             # Rx Antenna Gain
@@ -585,7 +590,7 @@ class MainWindow(QMainWindow):
             achievable_rate[i] = (max(0, rate_sub_bps), max(0, rate_mm_bps))
             
         frame_duration = 1e-3 # 1ms
-        packet_size = 256*8 # unspecified, so just pick this value
+        packet_size = 8000 # unspecified, so just pick this value
         achievable = [list(map(lambda x: int(x * frame_duration / packet_size), A)) for A in achievable_rate]
         #print("Achievable Rate: ", [list(map(float, A)) for A in achievable_rate])
         #print("Achievable: ", achievable)
@@ -609,12 +614,14 @@ class MainWindow(QMainWindow):
             self.plr[k] = (old_plr + cur_plr) / self.cur_frame
             metric += self.qlearn.PLR_req - self.plr[k]
         metric /= len(self.devices)
+        self.RewList.append(reward)
         
         #print("Send: ", action)
         #print("Recv: ", success)
         #print("Metric DeltaP: ", metric)
         
         if self.cur_frame % 100 == 0:
+            
             gw=self.graph_windows.get("Metric"); gw.add_point("Metric", self.cur_frame, metric)
             gw=self.graph_windows.get("Reward"); gw.add_point("Reward", self.cur_frame, reward)
         

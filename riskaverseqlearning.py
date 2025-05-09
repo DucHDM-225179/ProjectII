@@ -76,7 +76,7 @@ class RiskAverseQLearning:
         """
         cur_state = self.cur_state
         
-        # compute Q_hat explicitly (fix big oversight)
+        # compute Q_hat explicitly
         Q_bar = defaultdict(lambda:defaultdict(lambda:0.0))
         for i in range(self.num_Qtable):
             if cur_state not in self.Q_table[i]:
@@ -86,9 +86,12 @@ class RiskAverseQLearning:
                 Q_bar[cur_state][a] += q[a]
         Q_hat = defaultdict(lambda:defaultdict(lambda:0.0))
         for a in itertools.product(range(3), repeat=self.num_devices):
+            # variance
             for i in range(self.num_Qtable):
                 if cur_state in self.Q_table[i] and a in self.Q_table[i][cur_state]:
                     Q_hat[cur_state][a] += (self.Q_table[i][cur_state][a] - Q_bar[cur_state][a] / self.num_Qtable)**2
+            
+            # Q_hat
             q = 0
             if cur_state in self.Q_table[Q_hat_index] and a in self.Q_table[Q_hat_index][cur_state]:
                 q = self.Q_table[Q_hat_index][cur_state][a]
