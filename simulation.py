@@ -6,30 +6,32 @@ from PyQt5.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsItem,
     QAction, QActionGroup, QToolBar, QDockWidget, QWidget,
     QFormLayout, QDoubleSpinBox, QSpinBox, QPushButton,
-    QVBoxLayout, QHBoxLayout, QDialog, QDialogButtonBox
+    QVBoxLayout, QHBoxLayout, QDialog, QDialogButtonBox,
+    QFileDialog
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import numpy as np
+import json
 from riskaverseqlearning import RiskAverseQLearning
 
 # ---- Constants ----
 AP_COORD = QPointF(0, 0)
 AP_RADIUS = 5
 POINT_SIZE = 5
+PACKET_SIZE = 8000
+FRAME_DURATION = 1e-3
 
 # ---- Graph Window ----
 class GraphWindow(QMainWindow):
     def __init__(self, title="Graph", xlabel="X", ylabel="Y", fit_to_screen=True, padding=(0.1, 0.1)):
         super().__init__()
         self.setWindowTitle(title)
-        self.nabel = xlabel
+        self.xlabel = xlabel
         self.ylabel = ylabel
         self.fit_to_screen = fit_to_screen
         self.padding = padding
-        self.xlabel = xlabel
-        self.ylabel = ylabel
-
+        
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -357,6 +359,7 @@ class GridScene(QGraphicsScene):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._create_menu()
         self.setWindowTitle("5G Network Simulator")
         self.scene = GridScene(-500, -500, 1000, 1000, POINT_SIZE)
         self.view = GridView(self.scene)
@@ -434,6 +437,82 @@ class MainWindow(QMainWindow):
         self.devices = []
         self.blockages = []
 
+    def _create_menu(self):
+        menubar = self.menuBar()
+        file_menu = menubar.addMenu("File")
+
+        save_action = QAction("Save JSON", self)
+        save_action.triggered.connect(self.save_json)
+        file_menu.addAction(save_action)
+
+        load_action = QAction("Load JSON", self)
+        load_action.triggered.connect(self.load_json)
+        file_menu.addAction(load_action)
+
+    def save_json(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Layout", "", "JSON Files (*.json)"
+        )
+        if not path:
+            return
+
+        data = {
+            "devices": [
+                {"pos": [d.position[0], d.position[1]]}
+                for d in self.devices
+            ],
+            "blockages": [
+                {"pos": [b.position[0], b.position[1]]}
+                for b in self.blockages
+            ],
+        }
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+
+    def load_json(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Layout", "", "JSON Files (*.json)"
+        )
+        if not path:
+            return
+
+        with open(path, "r") as f:
+            data = json.load(f)
+
+        # Remove every existing device/blockage
+        for item in list(self.devices):
+            self.scene.removeItem(item)
+            self.removeItem(item)
+        for item in list(self.blockages):
+            self.scene.removeItem(item)
+            self.removeItem(item)
+
+        # Re-create from loaded JSON
+        self.devices.clear()
+        self.blockages.clear()
+
+        for d in data.get("devices", []):
+            x, y = d["pos"]
+            itm = DeviceItem(QPointF(x, y), self)
+            self.devices.append(itm)
+            self.scene.addItem(itm)
+
+        for b in data.get("blockages", []):
+            x, y = b["pos"]
+            itm = BlockageItem(QPointF(x, y), self)
+            self.blockages.append(itm)
+            self.scene.addItem(itm)
+    def closeEvent(self, event):
+        # Close all Matplotlib/QMainWindow graphs
+        for gw in self.graph_windows.values():
+            gw.close()
+        if hasattr(self, 'choice_win_ref') and self.choice_win_ref:
+            self.choice_win_ref.close()
+        # Then proceed with normal shutdown
+        super().closeEvent(event)
+
+
+
     def _scene_click(self, event):
         if event.button() == Qt.LeftButton:
             pos = event.scenePos()
@@ -459,13 +538,50 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(False)
         self.reset_btn.setEnabled(True)
         
+         # --- Packet Loss Rate Graph ---
+        plr_gw = GraphWindow(title="Packet Loss Rate", xlabel="Frame", ylabel="PLR", fit_to_screen=False)
+        for i in range(len(self.devices)):
+            plr_gw.add_series(f"Device {i+1}", [0], [0])
+        plr_gw.show()
+        self.graph_windows['PLR'] = plr_gw
+        
+        # --- Choice Distribution Bar Graph ---
+        fig = Figure()
+        canvas = FigureCanvas(fig)
+        ax = fig.add_subplot(111)
+        ax.set_title("Choice Distribution")
+        ax.set_xlabel("Device")
+        ax.set_ylabel("Ratio")
+        self.choice_window = {'canvas': canvas, 'ax': ax}
+        self.choice_counts = [[0,0,0] for _ in self.devices]
+        # layout in a new window
+        choice_win = QMainWindow()
+        choice_win.setWindowTitle("Choice Distribution")
+        w = QWidget()
+        choice_win.setCentralWidget(w)
+        v = QVBoxLayout(w)
+        v.addWidget(canvas)
+        choice_win.show()
+        self.choice_win_ref = choice_win
+        
         self.setup_simulation()
         
     def _on_reset(self):
         # clear graphs
         for gw in self.graph_windows.values(): gw.clear()
-        self._on_start()
+        
+        self.choice_counts = [[0,0,0] for _ in self.devices]
+        if self.choice_window:
+            ax = self.choice_window['ax']; 
+            ax.cla(); 
+            ax.set_title("Choice Distribution"); 
+            ax.set_xlabel("Device"); 
+            ax.set_ylabel("Ratio"); 
+            self.choice_window['canvas'].draw()
 
+        self.setup_simulation()
+
+        
     def setup_simulation(self):
         for d in self.devices: 
             d.history = {"sub6_success":[],"mmwave_success":[]}
@@ -487,15 +603,18 @@ class MainWindow(QMainWindow):
                 self.nblocks[i] += 1
         self.plr = [0] * len(self.devices)
         self.RewList = []
-        self.qlearn = RiskAverseQLearning(len(self.devices), self.cfg.num_subchannel.value(), self.cfg.num_beam.value(), 4, 1e-3, 8000)
+        self.runnRew = 0
+        self.qlearn = RiskAverseQLearning(len(self.devices), self.cfg.num_subchannel.value(), self.cfg.num_beam.value(), 4, FRAME_DURATION, PACKET_SIZE)
 
     def _on_step(self):
         if self.cur_frame >= self.cfg.nframes.value(): 
             self.timer.stop()
             
+            # finish, write log file
             with open('log.txt', 'w+') as f:
                 f.write('\n'.join([str(x) for x in self.RewList]))
             
+            # print( self.qlearn.CC )
             return
         self.cur_frame += 1
         self.simulation()
@@ -542,7 +661,7 @@ class MainWindow(QMainWindow):
         
         mmWave_tx_beamwidth_rad = 0.1
         mmWave_tx_sidelobe_gain = 0.1
-        mmWave_rx_gain_lin = self._db_to_linear(3.0)
+        mmWave_rx_gain_lin = 1
 
         for i, dev in enumerate(self.devices):
             d = self.distances[i]
@@ -589,13 +708,17 @@ class MainWindow(QMainWindow):
 
             achievable_rate[i] = (max(0, rate_sub_bps), max(0, rate_mm_bps))
             
-        frame_duration = 1e-3 # 1ms
-        packet_size = 8000 # unspecified, so just pick this value
+        frame_duration = FRAME_DURATION 
+        packet_size = PACKET_SIZE 
         achievable = [list(map(lambda x: int(x * frame_duration / packet_size), A)) for A in achievable_rate]
         #print("Achievable Rate: ", [list(map(float, A)) for A in achievable_rate])
-        #print("Achievable: ", achievable)
+        print("Achievable: ", achievable)
         
         q_learn_act, safe = self.qlearn.get_current_action()
+        
+        for d, a in enumerate(q_learn_act):
+            self.choice_counts[d][a] += 1
+        
         action = self.qlearn.map_action(q_learn_act)
         success = [[0, 0] for _ in range(num_devices)]
         if safe:
@@ -615,15 +738,35 @@ class MainWindow(QMainWindow):
             metric += self.qlearn.PLR_req - self.plr[k]
         metric /= len(self.devices)
         self.RewList.append(reward)
+        self.runnRew += reward
         
-        #print("Send: ", action)
-        #print("Recv: ", success)
+        print("Send: ", action)
+        print("Recv: ", success)
         #print("Metric DeltaP: ", metric)
         
         if self.cur_frame % 100 == 0:
             
             gw=self.graph_windows.get("Metric"); gw.add_point("Metric", self.cur_frame, metric)
-            gw=self.graph_windows.get("Reward"); gw.add_point("Reward", self.cur_frame, reward)
+            gw=self.graph_windows.get("Reward"); gw.add_point("Reward", self.cur_frame, self.runnRew / max(1,len(self.RewList)) / max(1,len(self.devices)))
+            
+            plr_gw = self.graph_windows.get('PLR')
+            for d, val in enumerate(self.plr):
+                plr_gw.add_point(f"Device {d+1}", self.cur_frame, val)
+        
+            # update choice bar
+            ax = self.choice_window['ax']
+            ax.cla()
+            num = len(self.devices)
+            ind = np.arange(num)
+            width = 0.2
+            counts = np.array(self.choice_counts)
+            for j in range(3):
+                ax.bar(ind + (j-1)*width, counts[:, j], width, label=f"Choice {j}")
+            ax.set_xticks(ind)
+            ax.set_xticklabels([f"D{i+1}" for i in range(num)])
+            ax.legend()
+            self.choice_window['canvas'].draw()
+        
         
         print(f"Stepped, frame: {self.cur_frame}")
         
