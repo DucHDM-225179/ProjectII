@@ -14,6 +14,12 @@ from matplotlib.figure import Figure
 import numpy as np
 import json
 from riskaverseqlearning import RiskAverseQLearning
+from deepqlearning_simple import DeepQLearning
+from deepqlearning_riskaverse import RiskAverseDeepQLearning
+import random
+
+import os
+from datetime import datetime
 
 # ---- Constants ----
 AP_COORD = QPointF(0, 0)
@@ -21,6 +27,17 @@ AP_RADIUS = 5
 POINT_SIZE = 5
 PACKET_SIZE = 8000
 FRAME_DURATION = 1e-3
+USE_RISK_AVERSE = False
+USE_DEEP_RISK = True
+
+SUFFIX_STR = ""
+if USE_RISK_AVERSE:
+    SUFFIX_STR = "RA"
+else:
+    if USE_DEEP_RISK:
+        SUFFIX_STR = "DEEPRA"
+    else:
+        SUFFIX_STR = "DEEP"
 
 # ---- Graph Window ----
 class GraphWindow(QMainWindow):
@@ -451,7 +468,7 @@ class MainWindow(QMainWindow):
 
     def save_json(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Layout", "", "JSON Files (*.json)"
+            self, "Save Layout + Settings", "", "JSON Files (*.json)"
         )
         if not path:
             return
@@ -465,13 +482,22 @@ class MainWindow(QMainWindow):
                 {"pos": [b.position[0], b.position[1]]}
                 for b in self.blockages
             ],
+            "settings": {
+                "pwr":             self.cfg.pwr.value(),
+                "noise":           self.cfg.noise.value(),
+                "bw_sub6":         self.cfg.bw_sub6.value(),
+                "bw_mm":           self.cfg.bw_mm.value(),
+                "num_subchannel":  self.cfg.num_subchannel.value(),
+                "num_beam":        self.cfg.num_beam.value(),
+                "nframes":         self.cfg.nframes.value(),
+            }
         }
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
 
     def load_json(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Layout", "", "JSON Files (*.json)"
+            self, "Load Layout + Settings", "", "JSON Files (*.json)"
         )
         if not path:
             return
@@ -479,29 +505,39 @@ class MainWindow(QMainWindow):
         with open(path, "r") as f:
             data = json.load(f)
 
-        # Remove every existing device/blockage
+        # --- Clear existing items ---
         for item in list(self.devices):
             self.scene.removeItem(item)
             self.removeItem(item)
         for item in list(self.blockages):
             self.scene.removeItem(item)
             self.removeItem(item)
-
-        # Re-create from loaded JSON
         self.devices.clear()
         self.blockages.clear()
 
+        # --- Restore devices/blockages ---
         for d in data.get("devices", []):
             x, y = d["pos"]
             itm = DeviceItem(QPointF(x, y), self)
             self.devices.append(itm)
             self.scene.addItem(itm)
-
         for b in data.get("blockages", []):
             x, y = b["pos"]
             itm = BlockageItem(QPointF(x, y), self)
             self.blockages.append(itm)
             self.scene.addItem(itm)
+
+        # --- Restore global config ---
+        s = data.get("settings", {})
+        if "pwr"            in s: self.cfg.pwr.setValue(s["pwr"])
+        if "noise"          in s: self.cfg.noise.setValue(s["noise"])
+        if "bw_sub6"        in s: self.cfg.bw_sub6.setValue(s["bw_sub6"])
+        if "bw_mm"          in s: self.cfg.bw_mm.setValue(s["bw_mm"])
+        if "num_subchannel" in s: self.cfg.num_subchannel.setValue(s["num_subchannel"])
+        if "num_beam"       in s: self.cfg.num_beam.setValue(s["num_beam"])
+        if "nframes"        in s: self.cfg.nframes.setValue(s["nframes"])
+       
+
     def closeEvent(self, event):
         # Close all Matplotlib/QMainWindow graphs
         for gw in self.graph_windows.values():
@@ -542,8 +578,12 @@ class MainWindow(QMainWindow):
         plr_gw = GraphWindow(title="Packet Loss Rate", xlabel="Frame", ylabel="PLR", fit_to_screen=False)
         for i in range(len(self.devices)):
             plr_gw.add_series(f"Device {i+1}", [0], [0])
+        plr_gw.ax.axhline(y=0.1, color='dimgray', linestyle='--', linewidth=1.2, label='PLR Max')
+        plr_gw.ax.legend() 
+        plr_gw.canvas.draw()
         plr_gw.show()
         self.graph_windows['PLR'] = plr_gw
+        
         
         # --- Choice Distribution Bar Graph ---
         fig = Figure()
@@ -568,8 +608,13 @@ class MainWindow(QMainWindow):
         
     def _on_reset(self):
         # clear graphs
-        for gw in self.graph_windows.values(): gw.clear()
-        
+        for gw_name, gw in self.graph_windows.items(): 
+            gw.clear()
+            if gw_name == "PLR" and hasattr(gw, 'ax') and gw.ax:
+                gw.ax.axhline(y=0.1, color='dimgray', linestyle='--', linewidth=1.2, label='PLR Max')
+                gw.ax.legend() 
+                gw.canvas.draw()
+
         self.choice_counts = [[0,0,0] for _ in self.devices]
         if self.choice_window:
             ax = self.choice_window['ax']; 
@@ -601,18 +646,78 @@ class MainWindow(QMainWindow):
                 if dot > sq:
                     continue
                 self.nblocks[i] += 1
+                
         self.plr = [0] * len(self.devices)
         self.RewList = []
+        self.MetricList = []
         self.runnRew = 0
-        self.qlearn = RiskAverseQLearning(len(self.devices), self.cfg.num_subchannel.value(), self.cfg.num_beam.value(), 4, FRAME_DURATION, PACKET_SIZE)
+        if USE_RISK_AVERSE:
+            self.qlearn = RiskAverseQLearning(len(self.devices), self.cfg.num_subchannel.value(), self.cfg.num_beam.value(), 4, FRAME_DURATION, PACKET_SIZE)
+        else:
+            if USE_DEEP_RISK:
+                self.qlearn = RiskAverseDeepQLearning(len(self.devices), 
+                    self.cfg.num_subchannel.value(), self.cfg.num_beam.value(), 4, 
+                    FRAME_DURATION, PACKET_SIZE, 
+                    replay_memory_capacity = 2000,
+                    batch_size = 128,
+                    dqn_hidden_layers=[20, 20, 20], 
+                    St = 1000,
+                    num_eta_levels=20,
+                    eta_min_val=-len(self.devices)*2,
+                    eta_max_val=len(self.devices))
+            else:
+                self.qlearn = DeepQLearning(len(self.devices), 
+                    self.cfg.num_subchannel.value(), self.cfg.num_beam.value(), 4, 
+                    FRAME_DURATION, PACKET_SIZE, 
+                    replay_memory_capacity = 2000,
+                    batch_size = 128,
+                    dqn_hidden_layers=[20, 20, 20], 
+                    St = 1000,
+                )
 
     def _on_step(self):
         if self.cur_frame >= self.cfg.nframes.value(): 
             self.timer.stop()
+            print("Simulation finished")
             
-            # finish, write log file
-            with open('log.txt', 'w+') as f:
-                f.write('\n'.join([str(x) for x in self.RewList]))
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = "output"
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            for fig_name, graph_window_instance in self.graph_windows.items():
+                if isinstance(graph_window_instance, GraphWindow): # Check if it's one of your custom graph windows
+                    safe_fig_name = "".join(c if c.isalnum() else "_" for c in fig_name).lower()
+                    filename = os.path.join(output_dir, f"{timestamp_str}_{safe_fig_name}_{SUFFIX_STR}.png")
+                    try:
+                        graph_window_instance.figure.savefig(filename)
+                        print(f"Saved figure: {filename}")
+                    except Exception as e:
+                        print(f"Error saving figure {fig_name}: {e}")
+            if hasattr(self, 'choice_window') and self.choice_window and 'canvas' in self.choice_window:
+                # Assuming choice_window['canvas'].figure is the Matplotlib figure instance
+                if hasattr(self.choice_window['canvas'], 'figure'):
+                    safe_fig_name = "ChoiceDistribution".lower()
+                    filename = os.path.join(output_dir, f"{timestamp_str}_{safe_fig_name}_{SUFFIX_STR}.png")
+                    try:
+                        self.choice_window['canvas'].figure.savefig(filename)
+                        print(f"Saved figure: {filename}")
+                    except Exception as e:
+                        print(f"Error saving choice distribution figure: {e}")
+                else:
+                    print("Could not save choice distribution: Figure object not found in canvas.")
+            else:
+                print("Choice distribution window/figure not found for saving.")
+
+            
+            with open(os.path.join(output_dir, f'{timestamp_str}_log_{SUFFIX_STR}.txt'), 'w+') as f:
+                f.write(f'Num of devices: {len(self.devices)}\n')
+                f.write(f'PLR each devices: [ {" ".join(str(x) for x in self.plr)} ]\n')
+                f.write(f'Avg Success: {(len(self.devices) - sum(self.plr)) / len(self.devices)}\n')
+                f.write(f'Final Reward: {self.RewList[-1] / len(self.devices)}\n')
+                f.write(f'Final Metric: {self.MetricList[-1]}\n')
+                f.write(f'Data per Frame: \n\n')
+                f.write('\n'.join([f'M: {m} | R: {r}' for m, r in zip(self.MetricList, self.RewList)]))
+            self.RewList.clear()
             
             # print( self.qlearn.CC )
             return
@@ -714,7 +819,10 @@ class MainWindow(QMainWindow):
         #print("Achievable Rate: ", [list(map(float, A)) for A in achievable_rate])
         print("Achievable: ", achievable)
         
-        q_learn_act, safe = self.qlearn.get_current_action()
+        if not USE_RISK_AVERSE and USE_DEEP_RISK:
+            q_learn_act, eta_idx, safe = self.qlearn.get_current_action(self.cur_frame)
+        else:
+            q_learn_act, safe = self.qlearn.get_current_action(self.cur_frame)
         
         for d, a in enumerate(q_learn_act):
             self.choice_counts[d][a] += 1
@@ -722,22 +830,22 @@ class MainWindow(QMainWindow):
         action = self.qlearn.map_action(q_learn_act)
         success = [[0, 0] for _ in range(num_devices)]
         if safe:
-            for k in range(num_devices):
-                for i in range(2):
-                    success[k][i] = min(action[k][i], achievable[k][i])
-        reward = self.qlearn.update_to_new_state(success, self.cur_frame, q_learn_act, achievable_rate)
+            success = [[min(act,achi) for act, achi in zip(a1, a2)] for a1, a2 in zip(action, achievable)]
+        if not USE_RISK_AVERSE and USE_DEEP_RISK:
+            reward = self.qlearn.update_to_new_state(success, self.cur_frame, q_learn_act, eta_idx, achievable_rate)
+        else:
+            reward = self.qlearn.update_to_new_state(success, self.cur_frame, q_learn_act, achievable_rate)
         
         metric = 0 
         for k in range(len(self.devices)):
-            cur_psr = 1
-            if sum(action[k]):
-                cur_psr = sum(success[k])/sum(action[k])
-            cur_plr = 1-cur_psr
+            cur_psr = 1 if not sum(action[k]) else sum(success[k]) / sum(action[k])
+            cur_plr = 1 - cur_psr
             old_plr = self.plr[k] * (self.cur_frame-1)
             self.plr[k] = (old_plr + cur_plr) / self.cur_frame
             metric += self.qlearn.PLR_req - self.plr[k]
         metric /= len(self.devices)
         self.RewList.append(reward)
+        self.MetricList.append(metric)
         self.runnRew += reward
         
         print("Send: ", action)
@@ -747,7 +855,7 @@ class MainWindow(QMainWindow):
         if self.cur_frame % 100 == 0:
             
             gw=self.graph_windows.get("Metric"); gw.add_point("Metric", self.cur_frame, metric)
-            gw=self.graph_windows.get("Reward"); gw.add_point("Reward", self.cur_frame, self.runnRew / max(1,len(self.RewList)) / max(1,len(self.devices)))
+            gw=self.graph_windows.get("Reward"); gw.add_point("Reward", self.cur_frame, self.runnRew / max(1,self.cur_frame)  / max(1,len(self.devices)))
             
             plr_gw = self.graph_windows.get('PLR')
             for d, val in enumerate(self.plr):
@@ -766,8 +874,8 @@ class MainWindow(QMainWindow):
             ax.set_xticklabels([f"D{i+1}" for i in range(num)])
             ax.legend()
             self.choice_window['canvas'].draw()
-        
-        
+            
+            
         print(f"Stepped, frame: {self.cur_frame}")
         
 

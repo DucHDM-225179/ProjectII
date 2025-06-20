@@ -1,3 +1,5 @@
+#dqn.py 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F # Often used for activation functions
@@ -10,54 +12,41 @@ class DQNetwork(nn.Module):
     information related to a number of devices and outputs Q-values for
     all possible discrete actions.
     """
-    def __init__(self, num_devices: int, hidden_layer_list: list[int] = None):
-        """
-        Initializes the Deep Q-Network.
-
-        Args:
-            num_devices (int): The number of devices (K).
-                               Input parameters will be 4 * K.
-            hidden_layer_list (list[int], optional):
-                               A list of integers, where each integer specifies
-                               the number of nodes in that hidden layer.
-                               Defaults to [20, 20] (two hidden layers, each with 20 nodes).
-        """
-        super().__init__() # Call the __init__ of the parent class (nn.Module)
-
+    def __init__(self, num_devices: int, hidden_layer_list: list[int] = None,
+                 _input_features_override: int = None, # For RiskAverseDQN
+                 _output_features_override: int = None # For RiskAverseDQN
+                 ):
+        super().__init__()
         self.num_devices = num_devices
 
-        # Set default hidden layers if not provided
         if hidden_layer_list is None:
             self.hidden_layer_list = [20, 20]
         else:
-            # Ensure it's a list, make a copy to avoid modifying the original if it's passed around
             self.hidden_layer_list = list(hidden_layer_list)
 
-        # Calculate input and output dimensions
-        self.input_features = 4 * self.num_devices
-        self.output_features = 3 ** self.num_devices # 3^K output nodes
+        if _input_features_override is not None:
+            self.input_features = _input_features_override
+        else:
+            self.input_features = 4 * self.num_devices # Default
 
-        # --- Construct the layers ---
+        if _output_features_override is not None:
+            self.output_features = _output_features_override
+        else:
+            self.output_features = 3 ** self.num_devices # Default
+
         layers = []
         current_in_features = self.input_features
-
-        # Add hidden layers
-        if self.hidden_layer_list: # Check if the list is not empty
+        if self.hidden_layer_list:
             for num_nodes in self.hidden_layer_list:
                 if num_nodes <= 0:
                     raise ValueError("Number of nodes in a hidden layer must be positive.")
                 layers.append(nn.Linear(current_in_features, num_nodes))
-                layers.append(nn.ReLU()) # Standard activation for hidden layers in DQNs
+                #layers.append(nn.BatchNorm1d(num_nodes))
+                layers.append(nn.LayerNorm(num_nodes))
+                layers.append(nn.ReLU())
                 current_in_features = num_nodes
         
-        # Add the output layer
-        # The input to this layer is the output of the last hidden layer,
-        # or self.input_features if there are no hidden layers.
         layers.append(nn.Linear(current_in_features, self.output_features))
-        # Note: No activation function is typically applied to the final output layer
-        # of a DQN, as it directly outputs Q-values which can be any real number.
-
-        # Combine all layers into a sequential model
         self.network = nn.Sequential(*layers)
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:

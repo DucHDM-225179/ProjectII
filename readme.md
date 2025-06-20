@@ -17,6 +17,9 @@ python -m pip install -r requirements.txt
 python simulation.py
 ```
 
+# Về cách sử dụng
+Hãy sử dụng file notebook để tiến hành chạy, phần mềm mô phỏng chỉ sử dụng để giúp dễ dựng lại môi trường mô phỏng
+
 # Về phần mềm mô phỏng
 
 ![Minhhoa1](./minhhoa/01.png)

@@ -1,3 +1,5 @@
+#riskaverseqlearning.py
+
 import random
 import numpy as np
 from collections import defaultdict
@@ -6,7 +8,7 @@ import random
 import math
 
 class RiskAverseQLearning:
-    def __init__(self, K, N, M, I, Ts, d):
+    def __init__(self, K, N, M, I, Ts, d, St=1000):
         self.num_devices = K
         self.num_sub6 = N
         self.num_mmWave = M
@@ -14,7 +16,9 @@ class RiskAverseQLearning:
         self.frame_duration = Ts
         self.packet_size = d
         
-        self.exploration_rate = 0.5 # eps
+        self.cold_start = St
+        
+        self.exploration_rate = 0.999 # eps
         self.decay_factor = 0.995 # lambda
         self.discount_factor = 0.9 # gamma
         
@@ -24,7 +28,7 @@ class RiskAverseQLearning:
         self.PLR_req = 0.1 # phi_max
         self.Lk = [6] * K
         
-        self.known_average_rate = [[0,0] for _ in range(K)]
+        self.known_average_rate = [[self.packet_size / min(1,Ts) * self.Lk[_],self.packet_size / min(1,Ts) * self.Lk[_]] for _ in range(K)]
         self.Success = [[0, 0] for _ in range(K)]
         self.Alloc = [[0, 0] for _ in range(K)]
         self.PLR = [[0.0, 0.0] for _ in range(K)]
@@ -89,7 +93,7 @@ class RiskAverseQLearning:
                 Q_bar[cur_state][a] += q[a]
                 
         Q_hat = defaultdict(lambda:defaultdict(lambda:0.0))
-        mx = 0
+        #mx = 0
         for a in itertools.product(range(3), repeat=self.num_devices):
             # variance
             Q = Q_bar[cur_state][a] / self.num_Qtable
@@ -105,7 +109,7 @@ class RiskAverseQLearning:
                 q = self.Q_table[Q_hat_index][cur_state][a]
             V = q - self.risk_control / max(1,(self.num_Qtable-1)) * Q_hat[cur_state][a]
             Q_hat[cur_state][a] = V
-            mx = max(mx, V)
+            #mx = max(mx, V)
         a, v = self.get_max_action(Q_hat, cur_state)
         #assert(mx >= v)
         #if self.CC[cur_state] > 0:
@@ -151,9 +155,10 @@ class RiskAverseQLearning:
         # update known average rate
         for k in range(self.num_devices):
             for i in range(2):
-                old_rate = self.known_average_rate[k][i] * (cur_frame-1)
-                new_rate = sample_achievable[k][i]
-                self.known_average_rate[k][i] = (old_rate + new_rate) / cur_frame
+                alpha = 0.7
+                old_rate = self.known_average_rate[k][i] * alpha
+                new_rate = sample_achievable[k][i] * (1-alpha)
+                self.known_average_rate[k][i] = (old_rate + new_rate) 
         
         return total_reward
     
@@ -163,14 +168,14 @@ class RiskAverseQLearning:
         """
         for i, action in enumerate(action_chosen):
             if action == 0:
-                self.Alloc[i][0] = max(0, min(int(self.known_average_rate[i][0] * self.frame_duration / self.packet_size), self.Lk[i]))
+                self.Alloc[i][0] = max(1, min(int(self.known_average_rate[i][0] * self.frame_duration / self.packet_size), self.Lk[i]))
                 self.Alloc[i][1] = 0
             elif action == 1:
                 self.Alloc[i][0] = 0
-                self.Alloc[i][1] = max(0, min(int(self.known_average_rate[i][1] * self.frame_duration / self.packet_size), self.Lk[i]))
+                self.Alloc[i][1] = max(1, min(int(self.known_average_rate[i][1] * self.frame_duration / self.packet_size), self.Lk[i]))
             else:
-                self.Alloc[i][1] = max(0, min(int(self.known_average_rate[i][1] * self.frame_duration / self.packet_size), self.Lk[i]-1))
-                self.Alloc[i][0] = max(0, min(int(self.known_average_rate[i][0] * self.frame_duration / self.packet_size), self.Lk[i] - self.Alloc[i][1]))
+                self.Alloc[i][1] = max(1, min(int(self.known_average_rate[i][1] * self.frame_duration / self.packet_size), self.Lk[i]))
+                self.Alloc[i][0] = max(1, min(int(self.known_average_rate[i][0] * self.frame_duration / self.packet_size), self.Lk[i] - self.Alloc[i][1]))
         return self.Alloc
     
     def get_max_action(self, Q, s):
@@ -194,9 +199,7 @@ class RiskAverseQLearning:
             else:
                 if v > curMaxPosAction[1]:
                     curMaxPosAction = [action, v]
-        if curMaxNegAction[0] is None and curMaxPosAction[0] is None:
-            return [self.get_random_action_tuple(), 0]
-        if curMaxPosAction[0] is not None:
+        if curMaxPosAction[1] > -1e9:
             return curMaxPosAction
         if negActionCount == 3**self.num_devices:
             return curMaxNegAction
@@ -206,15 +209,16 @@ class RiskAverseQLearning:
                 aList.append(action)
         return [random.choice(aList), 0]
     
-    def get_current_action(self):
+    def get_current_action(self, cur_frame):
         """
         Env ask for best action
         """
         Q_hat_chosen = random.choice(range(self.num_Qtable))
-        self.exploration_rate *= self.decay_factor
+        if cur_frame >= self.cold_start:
+            if self.exploration_rate >= 0.01:
+                self.exploration_rate *= self.decay_factor
         r1 = random.random()
         if r1 < self.exploration_rate:
-            print("RANDOM!!!!")
             action_chosen = self.get_random_action_tuple()
         else:
             action_chosen = self.get_action_tuple(Q_hat_chosen)
@@ -231,7 +235,6 @@ class RiskAverseQLearning:
         """
         Env send result of action a(t), calc r(t), update to s(t+1)
         """
-        assert(self.cur_state)
         old_state = self.cur_state
         
         rew = self.receive_reward(reward, cur_frame, sample_achievable_rate)
@@ -250,13 +253,12 @@ class RiskAverseQLearning:
             oldQ = 0
             if old_state in self.Q_table[i] and action in self.Q_table[i][old_state]:
                 oldQ = self.Q_table[i][old_state][action]
-            oldA = 0
+            oldA = 1
             if old_state in self.Count[i] and action in self.Count[i][old_state]:
                 oldA = 1 / self.Count[i][old_state][action]
-            
             # find max Action in current Q (max[a] Q(s(t+1), *))
             max_QA = self.get_max_action(self.Q_table[i], new_state)[1]
-            x0 = -1
+            x0 = -10
             newQ = oldQ + oldA * (self.calc_utility(rew + self.discount_factor * max_QA - oldQ) - x0) # eq (21)
             
             self.Count[i][old_state][action] += 1 # line 14+15            
